@@ -1,0 +1,565 @@
+syntax = "proto3";
+
+package docuflow.v1;
+
+option java_package = "com.docuflow.shared.proto";
+option java_multiple_files = true;
+option php_namespace = "DocuFlow\Shared\Proto";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// ============================================================================
+// Core Domain Messages
+// ============================================================================
+
+message Document {
+  string id = 1;
+  string tenant_id = 2;
+  string document_type_id = 3;
+  string original_filename = 4;
+  string storage_path = 5;          // S3/minio path
+  string mime_type = 6;
+  int64 size_bytes = 7;
+  DocumentStatus status = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+  google.protobuf.Timestamp processed_at = 11;
+  map<string, string> metadata = 12;  // custom key-value from extraction
+  repeated DocumentPage pages = 13;
+}
+
+enum DocumentStatus {
+  DOCUMENT_STATUS_UNSPECIFIED = 0;
+  DOCUMENT_STATUS_UPLOADED = 1;
+  DOCUMENT_STATUS_QUEUED = 2;
+  DOCUMENT_STATUS_PROCESSING = 3;
+  DOCUMENT_STATUS_REVIEW_REQUIRED = 4;
+  DOCUMENT_STATUS_APPROVED = 5;
+  DOCUMENT_STATUS_REJECTED = 6;
+  DOCUMENT_STATUS_FAILED = 7;
+  DOCUMENT_STATUS_ARCHIVED = 8;
+}
+
+message DocumentPage {
+  int32 page_number = 1;
+  string storage_path = 2;        // rendered image/PDF page
+  int32 width_px = 3;
+  int32 height_px = 4;
+  repeated BoundingBox elements = 5;  // detected elements (tables, text blocks, etc.)
+}
+
+message BoundingBox {
+  double x = 1;
+  double y = 2;
+  double width = 3;
+  double height = 4;
+  string element_type = 5;        // "text", "table", "checkbox", "signature", "image"
+  float confidence = 6;
+}
+
+message DocumentType {
+  string id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  string description = 4;
+  repeated FieldDefinition fields = 5;
+  ValidationRules validation_rules = 6;
+  RoutingRules routing_rules = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message FieldDefinition {
+  string key = 1;
+  string label = 2;
+  FieldType type = 3;
+  bool required = 4;
+  string description = 5;
+  string regex_pattern = 6;       // for validation
+  repeated string enum_values = 7; // for select types
+  FieldDefinition parent = 8;      // nested objects
+  repeated FieldDefinition children = 9;
+}
+
+enum FieldType {
+  FIELD_TYPE_UNSPECIFIED = 0;
+  FIELD_TYPE_STRING = 1;
+  FIELD_TYPE_NUMBER = 2;
+  FIELD_TYPE_BOOLEAN = 3;
+  FIELD_TYPE_DATE = 4;
+  FIELD_TYPE_DATETIME = 5;
+  FIELD_TYPE_EMAIL = 6;
+  FIELD_TYPE_PHONE = 7;
+  FIELD_TYPE_CURRENCY = 8;
+  FIELD_TYPE_TABLE = 9;           // repeated rows of nested fields
+  FIELD_TYPE_OBJECT = 10;         // nested object
+  FIELD_TYPE_ARRAY = 11;          // array of primitives
+}
+
+message ValidationRules {
+  map<string, string> field_rules = 1;    // key -> regex or expression
+  repeated CrossFieldRule cross_field_rules = 2;
+}
+
+message CrossFieldRule {
+  string expression = 1;           // e.g., "total == sum(line_items[*].amount)"
+  string error_message = 2;
+  repeated string affected_fields = 3;
+}
+
+message RoutingRules {
+  string default_assignee_group = 1;
+  map<string, string> field_based_routing = 2;  // field_value -> assignee_group
+  int32 sla_hours = 3;
+  bool auto_approve_threshold_enabled = 4;
+  float auto_approve_confidence = 5;
+}
+
+// ============================================================================
+// Processing Job Messages
+// ============================================================================
+
+message ProcessingJob {
+  string id = 1;
+  string tenant_id = 2;
+  string document_id = 3;
+  JobStatus status = 4;
+  int32 current_step = 5;
+  repeated JobStep steps = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp started_at = 8;
+  google.protobuf.Timestamp completed_at = 9;
+  string error_message = 10;
+  int32 retry_count = 11;
+  google.protobuf.Struct context = 12;  // pipeline-specific context
+}
+
+enum JobStatus {
+  JOB_STATUS_UNSPECIFIED = 0;
+  JOB_STATUS_PENDING = 1;
+  JOB_STATUS_RUNNING = 2;
+  JOB_STATUS_PAUSED = 3;
+  JOB_STATUS_COMPLETED = 4;
+  JOB_STATUS_FAILED = 5;
+  JOB_STATUS_CANCELLED = 6;
+}
+
+message JobStep {
+  string name = 1;
+  StepStatus status = 2;
+  google.protobuf.Timestamp started_at = 3;
+  google.protobuf.Timestamp completed_at = 4;
+  google.protobuf.Struct input = 5;
+  google.protobuf.Struct output = 6;
+  string error_message = 7;
+  int32 retry_count = 8;
+}
+
+enum StepStatus {
+  STEP_STATUS_UNSPECIFIED = 0;
+  STEP_STATUS_PENDING = 1;
+  STEP_STATUS_RUNNING = 2;
+  STEP_STATUS_COMPLETED = 3;
+  STEP_STATUS_FAILED = 4;
+  STEP_STATUS_SKIPPED = 5;
+}
+
+// ============================================================================
+// Extraction Result Messages
+// ============================================================================
+
+message ExtractionResult {
+  string job_id = 1;
+  string document_id = 2;
+  ExtractionStatus status = 3;
+  map<string, ExtractedField> fields = 4;
+  repeated TableExtraction tables = 5;
+  float overall_confidence = 6;
+  google.protobuf.Timestamp extracted_at = 7;
+  string model_version = 8;
+  repeated ExtractionIssue issues = 9;
+}
+
+enum ExtractionStatus {
+  EXTRACTION_STATUS_UNSPECIFIED = 0;
+  EXTRACTION_STATUS_SUCCESS = 1;
+  EXTRACTION_STATUS_PARTIAL = 2;    // some fields missing/low confidence
+  EXTRACTION_STATUS_FAILED = 3;
+  EXTRACTION_STATUS_REVIEW_NEEDED = 4;
+}
+
+message ExtractedField {
+  string key = 1;
+  string value = 2;
+  float confidence = 3;
+  BoundingBox bbox = 4;
+  bool validated = 5;
+  string validation_error = 6;
+  repeated string alternatives = 7;  // alternative readings
+}
+
+message TableExtraction {
+  string table_id = 1;
+  repeated string headers = 2;
+  repeated TableRow rows = 3;
+  float confidence = 4;
+  BoundingBox bbox = 5;
+}
+
+message TableRow {
+  repeated string cells = 1;
+  repeated float cell_confidences = 2;
+}
+
+message ExtractionIssue {
+  string field_key = 1;
+  IssueSeverity severity = 2;
+  string message = 3;
+  string suggested_fix = 4;
+}
+
+enum IssueSeverity {
+  ISSUE_SEVERITY_UNSPECIFIED = 0;
+  ISSUE_SEVERITY_INFO = 1;
+  ISSUE_SEVERITY_WARNING = 2;
+  ISSUE_SEVERITY_ERROR = 3;
+  ISSUE_SEVERITY_CRITICAL = 4;
+}
+
+// ============================================================================
+// Webhook Event Messages
+// ============================================================================
+
+message WebhookEvent {
+  string id = 1;
+  string tenant_id = 2;
+  EventType type = 3;
+  google.protobuf.Timestamp timestamp = 4;
+  google.protobuf.Struct payload = 5;
+  int32 delivery_attempts = 6;
+  google.protobuf.Timestamp last_attempt_at = 7;
+  string last_error = 8;
+}
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  EVENT_TYPE_DOCUMENT_UPLOADED = 1;
+  EVENT_TYPE_DOCUMENT_PROCESSING_STARTED = 2;
+  EVENT_TYPE_DOCUMENT_PROCESSING_COMPLETED = 3;
+  EVENT_TYPE_DOCUMENT_PROCESSING_FAILED = 4;
+  EVENT_TYPE_DOCUMENT_REVIEW_REQUIRED = 5;
+  EVENT_TYPE_DOCUMENT_APPROVED = 6;
+  EVENT_TYPE_DOCUMENT_REJECTED = 7;
+  EVENT_TYPE_EXTRACTION_COMPLETED = 8;
+  EVENT_TYPE_WEBHOOK_DELIVERY_FAILED = 9;
+}
+
+// ============================================================================
+// Service Definitions
+// ============================================================================
+
+service DocumentService {
+  rpc CreateDocument(CreateDocumentRequest) returns (Document);
+  rpc GetDocument(GetDocumentRequest) returns (Document);
+  rpc UpdateDocument(UpdateDocumentRequest) returns (Document);
+  rpc DeleteDocument(DeleteDocumentRequest) returns (google.protobuf.Empty);
+  rpc ListDocuments(ListDocumentsRequest) returns (ListDocumentsResponse);
+  rpc GetDocumentPages(GetDocumentPagesRequest) returns (GetDocumentPagesResponse);
+}
+
+message CreateDocumentRequest {
+  string tenant_id = 1;
+  string document_type_id = 2;
+  string original_filename = 3;
+  string storage_path = 4;
+  string mime_type = 5;
+  int64 size_bytes = 6;
+  map<string, string> metadata = 7;
+}
+
+message GetDocumentRequest {
+  string id = 1;
+  string tenant_id = 2;
+}
+
+message UpdateDocumentRequest {
+  string id = 1;
+  string tenant_id = 2;
+  DocumentStatus status = 3;
+  map<string, string> metadata = 4;
+}
+
+message DeleteDocumentRequest {
+  string id = 1;
+  string tenant_id = 2;
+}
+
+message ListDocumentsRequest {
+  string tenant_id = 1;
+  string document_type_id = 2;
+  repeated DocumentStatus statuses = 3;
+  int32 page = 4;
+  int32 page_size = 5;
+  string sort_by = 6;
+  bool sort_desc = 7;
+}
+
+message ListDocumentsResponse {
+  repeated Document documents = 1;
+  int32 total = 2;
+  int32 page = 3;
+  int32 page_size = 4;
+}
+
+message GetDocumentPagesRequest {
+  string document_id = 1;
+  string tenant_id = 2;
+}
+
+message GetDocumentPagesResponse {
+  repeated DocumentPage pages = 1;
+}
+
+service ProcessingJobService {
+  rpc CreateJob(CreateJobRequest) returns (ProcessingJob);
+  rpc GetJob(GetJobRequest) returns (ProcessingJob);
+  rpc UpdateJobStatus(UpdateJobStatusRequest) returns (ProcessingJob);
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+  rpc RetryJob(RetryJobRequest) returns (ProcessingJob);
+  rpc CancelJob(CancelJobRequest) returns (ProcessingJob);
+}
+
+message CreateJobRequest {
+  string tenant_id = 1;
+  string document_id = 2;
+  repeated JobStepDefinition steps = 3;
+  google.protobuf.Struct context = 4;
+}
+
+message JobStepDefinition {
+  string name = 1;
+  google.protobuf.Struct config = 2;
+}
+
+message GetJobRequest {
+  string id = 1;
+  string tenant_id = 2;
+}
+
+message UpdateJobStatusRequest {
+  string id = 1;
+  string tenant_id = 2;
+  JobStatus status = 3;
+  int32 current_step = 4;
+  google.protobuf.Struct step_output = 5;
+  string error_message = 6;
+}
+
+message ListJobsRequest {
+  string tenant_id = 1;
+  repeated JobStatus statuses = 2;
+  string document_id = 3;
+  int32 page = 4;
+  int32 page_size = 5;
+}
+
+message ListJobsResponse {
+  repeated ProcessingJob jobs = 1;
+  int32 total = 2;
+  int32 page = 3;
+  int32 page_size = 4;
+}
+
+message RetryJobRequest {
+  string id = 1;
+  string tenant_id = 2;
+  bool from_failed_step = 3;
+}
+
+message CancelJobRequest {
+  string id = 1;
+  string tenant_id = 2;
+}
+
+service ExtractionService {
+  rpc ExtractDocument(ExtractDocumentRequest) returns (ExtractionResult);
+  rpc GetExtractionResult(GetExtractionResultRequest) returns (ExtractionResult);
+  rpc ValidateExtraction(ValidateExtractionRequest) returns (ExtractionResult);
+  rpc ExportExtraction(ExportExtractionRequest) returns (ExportResult);
+}
+
+message ExtractDocumentRequest {
+  string job_id = 1;
+  string document_id = 2;
+  string document_type_id = 3;
+  string storage_path = 4;
+  string mime_type = 5;
+  google.protobuf.Struct model_config = 6;  // model selection, params
+}
+
+message GetExtractionResultRequest {
+  string job_id = 1;
+  string tenant_id = 2;
+}
+
+message ValidateExtractionRequest {
+  string job_id = 1;
+  string tenant_id = 2;
+  map<string, string> corrected_fields = 3;  // field_key -> corrected_value
+}
+
+message ExportExtractionRequest {
+  string job_id = 1;
+  string tenant_id = 2;
+  ExportFormat format = 3;
+  map<string, string> options = 4;
+}
+
+enum ExportFormat {
+  EXPORT_FORMAT_UNSPECIFIED = 0;
+  EXPORT_FORMAT_JSON = 1;
+  EXPORT_FORMAT_CSV = 2;
+  EXPORT_FORMAT_XML = 3;
+  EXPORT_FORMAT_XLSX = 4;
+  EXPORT_FORMAT_PDF = 5;
+}
+
+message ExportResult {
+  string storage_path = 1;
+  string filename = 2;
+  int64 size_bytes = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+service WebhookService {
+  rpc RegisterWebhook(RegisterWebhookRequest) returns (WebhookRegistration);
+  rpc GetWebhook(GetWebhookRequest) returns (WebhookRegistration);
+  rpc ListWebhooks(ListWebhooksRequest) returns (ListWebhooksResponse);
+  rpc DeleteWebhook(DeleteWebhookRequest) returns (google.protobuf.Empty);
+  rpc TestWebhook(TestWebhookRequest) returns (WebhookDeliveryResult);
+}
+
+message WebhookRegistration {
+  string id = 1;
+  string tenant_id = 2;
+  string url = 3;
+  repeated EventType events = 4;
+  string secret = 5;              // HMAC secret for verification
+  bool active = 6;
+  google.protobuf.Timestamp created_at = 7;
+  int32 consecutive_failures = 8;
+  google.protobuf.Timestamp last_success_at = 9;
+}
+
+message RegisterWebhookRequest {
+  string tenant_id = 1;
+  string url = 2;
+  repeated EventType events = 3;
+  string secret = 4;
+}
+
+message GetWebhookRequest {
+  string id = 1;
+  string tenant_id = 2;
+}
+
+message ListWebhooksRequest {
+  string tenant_id = 1;
+  bool active_only = 2;
+}
+
+message ListWebhooksResponse {
+  repeated WebhookRegistration webhooks = 1;
+}
+
+message DeleteWebhookRequest {
+  string id = 1;
+  string tenant_id = 2;
+}
+
+message TestWebhookRequest {
+  string id = 1;
+  string tenant_id = 2;
+  EventType test_event = 3;
+}
+
+message WebhookDeliveryResult {
+  bool success = 1;
+  int32 status_code = 2;
+  string response_body = 3;
+  string error = 4;
+  google.protobuf.Timestamp delivered_at = 5;
+}
+
+// ============================================================================
+// ML Sidecar Service
+// ============================================================================
+
+service MLInferenceService {
+  rpc ClassifyDocument(ClassifyDocumentRequest) returns (ClassifyDocumentResponse);
+  rpc ExtractFields(ExtractFieldsRequest) returns (ExtractFieldsResponse);
+  rpc DetectTables(DetectTablesRequest) returns (DetectTablesResponse);
+  rpc DetectElements(DetectElementsRequest) returns (DetectElementsResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message ClassifyDocumentRequest {
+  string document_id = 1;
+  string storage_path = 2;
+  string mime_type = 3;
+  repeated string candidate_types = 4;  // document type IDs to consider
+}
+
+message ClassifyDocumentResponse {
+  string predicted_type_id = 1;
+  float confidence = 2;
+  map<string, float> all_scores = 3;
+}
+
+message ExtractFieldsRequest {
+  string document_id = 1;
+  string storage_path = 2;
+  string mime_type = 3;
+  string document_type_id = 4;
+  map<string, FieldDefinition> field_schema = 5;  // expected fields
+  google.protobuf.Struct model_options = 6;
+}
+
+message ExtractFieldsResponse {
+  map<string, ExtractedField> fields = 1;
+  float overall_confidence = 2;
+  string model_version = 3;
+  repeated ExtractionIssue issues = 4;
+}
+
+message DetectTablesRequest {
+  string document_id = 1;
+  string storage_path = 2;
+  string mime_type = 3;
+  int32 max_tables = 4;
+}
+
+message DetectTablesResponse {
+  repeated TableExtraction tables = 1;
+}
+
+message DetectElementsRequest {
+  string document_id = 1;
+  string storage_path = 2;
+  string mime_type = 3;
+  repeated string element_types = 4;  // filter: "table", "checkbox", "signature", etc.
+}
+
+message DetectElementsResponse {
+  repeated DocumentPage pages = 1;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string version = 2;
+  map<string, string> models_loaded = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
